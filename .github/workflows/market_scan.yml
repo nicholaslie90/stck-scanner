@@ -22,7 +22,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install -r requirements.txt
+          pip install yfinance requests pandas
 
       - name: Run Scanner Script
         env:
