@@ -14,8 +14,6 @@ API_URL = os.environ.get("CORE_API_URL")
 API_HOST = os.environ.get("CORE_API_HOST")
 
 SOURCE_FILE = "watchlist.txt"
-
-# Flag global untuk mencegah spam notifikasi error
 AUTH_ALERT_SENT = False
 
 # --- CLASSIFICATION ---
@@ -69,10 +67,6 @@ def push_notification(msg):
         except: pass
 
 def trigger_auth_alert():
-    """
-    Mengirim notifikasi 'halus' jika Token Expired.
-    Hanya dikirim sekali per sesi running.
-    """
     global AUTH_ALERT_SENT
     if AUTH_ALERT_SENT: return
     
@@ -86,7 +80,6 @@ def trigger_auth_alert():
 def query_external_source(target_id, start_dt, end_dt):
     if not API_URL or not API_KEY: return None
     
-    # Cek jika alert sudah dikirim, hentikan semua request selanjutnya untuk hemat resource
     global AUTH_ALERT_SENT
     if AUTH_ALERT_SENT: return None
 
@@ -112,21 +105,29 @@ def query_external_source(target_id, start_dt, end_dt):
         time.sleep(0.6) 
         res = requests.get(endpoint, headers=headers, params=params, timeout=10)
         
-        # --- LOGIC BARU UNTUK TOKEN EXPIRED ---
         if res.status_code == 401:
             trigger_auth_alert()
             return None
-        # --------------------------------------
 
         if res.status_code == 200:
             payload = res.json()
-            if 'data' in payload: return payload['data']
+            # Validasi awal: Pastikan 'data' ada
+            if 'data' in payload: 
+                return payload['data']
             
     except: pass
     return None
 
 def process_smart_money(raw_data):
+    # 1. Cek Apakah Data Ada
     if not raw_data: return None
+
+    # 2. [FIX] Cek Apakah Tipe Data Benar (LIST)
+    # Error terjadi karena raw_data berupa String, bukan List
+    if not isinstance(raw_data, list):
+        # Print error ke Log GitHub Actions supaya kita tau isinya apa
+        print(f"⚠️ Invalid Data Format (Expecting List, got {type(raw_data)}): {raw_data}")
+        return None
 
     alpha_net = 0 
     beta_net = 0  
@@ -134,7 +135,12 @@ def process_smart_money(raw_data):
     top_buyer = {'id': '-', 'val': 0, 'avg': 0}
     top_seller = {'id': '-', 'val': 0}
 
-    sorted_by_val = sorted(raw_data, key=lambda x: abs(float(x.get('value', 0))), reverse=True)
+    # Gunakan try-except saat sorting untuk safety tambahan
+    try:
+        sorted_by_val = sorted(raw_data, key=lambda x: abs(float(x.get('value', 0))), reverse=True)
+    except Exception as e:
+        print(f"⚠️ Sort Error: {e}")
+        return None
     
     if sorted_by_val:
         b_node = [x for x in sorted_by_val if float(x['value']) > 0]
@@ -152,6 +158,9 @@ def process_smart_money(raw_data):
             }
 
     for row in raw_data:
+        # Validasi row harus dictionary
+        if not isinstance(row, dict): continue
+        
         code = row.get('broker_code')
         val = float(row.get('value', 0))
         
@@ -163,14 +172,13 @@ def process_smart_money(raw_data):
     score = 0
     tags = []
     
-    # 1. ALPHA FLOW
+    # Scoring Logic
     if alpha_net > 1_000_000_000:
         score += 3
         tags.append("ALPHA_IN")
     elif alpha_net > 200_000_000:
         score += 1
         
-    # 2. BETA FLOW
     if beta_net < -500_000_000: 
         score += 2 
         tags.append("BETA_OUT")
@@ -178,7 +186,6 @@ def process_smart_money(raw_data):
         score -= 3 
         tags.append("BETA_FOMO")
         
-    # 3. DOMINANCE
     if top_buyer['id'] in AGENT_ALPHA: score += 2
     elif top_buyer['id'] in AGENT_BETA: score -= 2
 
@@ -205,19 +212,24 @@ def resolve_name(code):
     return f"{code}-{ENTITY_MAP.get(code, '')}"
 
 def main():
-    if not API_KEY: return
+    if not API_KEY: 
+        print("❌ Core API Key missing")
+        return
 
     curr_dt, long_dt = get_time_window()
     targets = load_targets()
     
+    print(f"🚀 Running Sync for {curr_dt}")
+    
     output_buffer = []
 
     for item in targets:
-        # Stop jika auth failed
         if AUTH_ALERT_SENT: break 
         
+        print(f"Scanning {item}...")
         d_res = process_smart_money(query_external_source(item, curr_dt, curr_dt))
-        if AUTH_ALERT_SENT: break # Double check setelah request pertama
+        
+        if AUTH_ALERT_SENT: break 
         
         t_res = process_smart_money(query_external_source(item, long_dt, curr_dt))
         
@@ -233,13 +245,14 @@ def main():
                 "t": t_res
             })
 
-    # Jika Auth Error terjadi, script akan berhenti di sini dan tidak mengirim report kosong
     if AUTH_ALERT_SENT: 
         print("⛔ Auth failed. Notification sent.")
         return
 
     output_buffer.sort(key=lambda x: x['rank'], reverse=True)
-    if not output_buffer: return
+    if not output_buffer: 
+        print("⚠️ No valid data found for report.")
+        return
 
     txt = f"🧠 *SMART FLOW INSIGHT* 🧠\n"
     txt += f"📅 {curr_dt}\n"
@@ -269,6 +282,7 @@ def main():
         txt += "----------------------------\n"
         
     push_notification(txt)
+    print("✅ Done.")
 
 if __name__ == "__main__":
     main()
