@@ -9,215 +9,208 @@ import yfinance as yf
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GOAPI_KEY = os.environ.get("GOAPI_KEY")
+WATCHLIST_FILE = "watchlist.txt"
 
-# --- UNIVERSE SAHAM ---
-STOCKS = [
-    "BBCA", "BBRI", "BMRI", "BBNI", "BRIS", "ARTO", "BBTN", 
-    "ADRO", "PTBA", "ITMG", "PGAS", "MEDC", "AKRA", 
-    "ANTM", "INCO", "MDKA", "TINS", "NCKL", "MBMA", "AMMN", "BRMS", "PSAB",
-    "TLKM", "EXCL", "ISAT", "TOWR", 
-    "ASII", "UNTR", "GOTO", "BUKA", "EMTK", 
-    "BSDE", "CTRA", "SMRA", "PANI", "ASRI", 
-    "ICBP", "INDF", "MYOR", "UNVR", "KLBF", "CPIN", "JPFA", 
-    "BREN", "TPIA", "BRPT", "CUAN", "DEWA", "BUMI", "ENRG", "DAAZ", "SRTG"
-]
-
+# --- KAMUS BROKER (MAPPING) ---
 BROKER_MAP = {
-    'YP': 'Mirae', 'PD': 'IndoPremier', 'CC': 'Mandiri', 'NI': 'BNI', 'XC': 'Ajaib', 
-    'KK': 'Phillip', 'SQ': 'BCA', 'XL': 'Stockbit', 'GR': 'Panin', 'OD': 'Danareksa',
-    'AZ': 'Sucor', 'EP': 'MNC', 'DR': 'RHB', 'YJ': 'Lautandhana', 'CP': 'Valbury', 
-    'HP': 'Henan', 'BK': 'JP Morgan', 'ZP': 'Maybank', 'AK': 'UBS', 'RX': 'Macquarie', 
-    'KZ': 'CLSA', 'CS': 'Credit Suisse', 'DX': 'Bahana', 'BB': 'Verdhana', 'YU': 'CGS', 
-    'LG': 'Trimegah', 'AI': 'UOB', 'MG': 'Semesta', 'RF': 'Buana', 'IF': 'Samuel', 'DH': 'Sinarmas'
+    'YP': 'Mirae (Ritel)', 'PD': 'IndoPremier (Ritel)', 'XC': 'Ajaib (Ritel)', 
+    'XL': 'Stockbit (Ritel)', 'SQ': 'BCA Sekuritas', 'NI': 'BNI Sekuritas',
+    'KK': 'Phillip (Ritel)', 'CC': 'Mandiri', 'DR': 'RHB', 'OD': 'Danareksa',
+    'AZ': 'Sucor', 'MG': 'Semesta (Bandar)', 'BK': 'JP Morgan', 'AK': 'UBS', 
+    'ZP': 'Maybank', 'KZ': 'CLSA', 'RX': 'Macquarie', 'BB': 'Verdhana', 
+    'AI': 'UOB', 'YU': 'CGS CIMB', 'LG': 'Trimegah', 'RF': 'Buana', 
+    'IF': 'Samuel', 'CP': 'Valbury', 'HP': 'Henan Putihrai', 'YJ': 'Lautandhana'
 }
-RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'SQ', 'KK', 'NI', 'CC', 'GR', 'DR', 'EP']
 
-def get_time_mode():
+# Broker Ritel Murni (Indikasi FOMO jika mereka Top Buyer)
+RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'KK', 'CC', 'NI']
+
+def get_my_watchlist():
+    """Membaca file watchlist.txt dari repo"""
+    if not os.path.exists(WATCHLIST_FILE):
+        print(f"⚠️ Warning: {WATCHLIST_FILE} tidak ditemukan. Menggunakan default.")
+        return ["BBCA", "BBRI", "BMRI", "ADRO", "TLKM", "ASII", "GOTO", "ANTM"]
+    
+    with open(WATCHLIST_FILE, 'r') as f:
+        # Bersihkan format: Hapus spasi, enter, dan .JK jika user menulisnya
+        # GoAPI butuh "BBCA", YFinance butuh "BBCA.JK" (nanti kita handle)
+        tickers = [line.strip().upper().replace(".JK", "") for line in f.readlines() if line.strip()]
+    
+    print(f"📋 Loaded {len(tickers)} stocks from watchlist.")
+    return list(set(tickers)) # Hapus duplikat jika ada
+
+def get_target_date():
+    """
+    Logika Waktu:
+    - Pagi (< 12:00 WIB) -> Data Closing Kemarin (Plan Hari Ini)
+    - Sore (> 12:00 WIB) -> Data Closing Hari Ini (Summary)
+    """
     utc_now = datetime.datetime.utcnow()
     wib_now = utc_now + datetime.timedelta(hours=7)
     
-    if wib_now.hour < 12:
-        date_target = wib_now - datetime.timedelta(days=1)
-        while date_target.weekday() > 4: date_target -= datetime.timedelta(days=1)
-        return "MORNING", date_target.strftime("%Y-%m-%d")
-    else:
-        date_target = wib_now
-        while date_target.weekday() > 4: date_target -= datetime.timedelta(days=1)
-        return "AFTERNOON", date_target.strftime("%Y-%m-%d")
+    if wib_now.hour < 12: # Mode Pagi
+        target = wib_now - datetime.timedelta(days=1)
+        while target.weekday() > 4: # Skip Weekend
+            target -= datetime.timedelta(days=1)
+        return target.strftime("%Y-%m-%d"), "PLAN (Data Kemarin)"
+    else: # Mode Sore
+        target = wib_now
+        while target.weekday() > 4: 
+            target -= datetime.timedelta(days=1)
+        return target.strftime("%Y-%m-%d"), "SUMMARY (Data Hari Ini)"
 
-def get_broker_flow(ticker, date_str):
+def get_broker_summary(ticker, date_str):
     url = f"https://api.goapi.io/stock/idx/{ticker}/broker_summary"
     headers = {"X-API-KEY": GOAPI_KEY, "Accept": "application/json"}
-    
     try:
-        time.sleep(0.5) # Perpanjang delay biar API tidak ngambek (Rate Limit)
+        time.sleep(0.3) # Rate Limit Safety
         res = requests.get(url, headers=headers, params={"date": date_str}, timeout=10)
-        
-        # DEBUG LOG: Lihat apa respon API sebenarnya
-        if res.status_code != 200:
-            print(f"   ⚠️ GoAPI Error {ticker}: {res.status_code}")
-            return [], []
-
         data = res.json()
         if data.get('status') == 'success' and data.get('data'):
-            d = data['data']
-            return d.get('top_buyers', []), d.get('top_sellers', [])
-        else:
-            return [], []
-            
-    except Exception as e: 
-        print(f"   ⚠️ Connection Error {ticker}: {e}")
-        return [], []
+            return data['data']
+    except Exception as e:
+        print(f"   ⚠️ Error fetch {ticker}: {e}")
+    return None
 
-def get_technicals(ticker):
-    try:
-        df = yf.download(f"{ticker}.JK", period="5d", progress=False)
-        if df.empty: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-        
-        close = df['Close'].iloc[-1]
-        prev_close = df['Close'].iloc[-2]
-        change = ((close - prev_close)/prev_close)*100
-        
-        # VWAP Simple
-        typ = (df['High'] + df['Low'] + df['Close']) / 3
-        vwap = (typ * df['Volume']).sum() / df['Volume'].sum()
-        
-        return {"close": int(close), "change": change, "vwap": int(vwap)}
-    except: return None
-
-def analyze_stock(ticker, date_str):
-    # 1. Fetch Data
-    buyers, sellers = get_broker_flow(ticker, date_str)
-    tech = get_technicals(ticker)
-    
-    # 2. Safety Check: Kalau Technical Gagal, Skip. 
-    # (Kalau Bandar gagal gpp, kita masih punya harga)
-    if not tech: 
-        print(f"   ⚠️ Skip {ticker}: No YFinance Data")
+def analyze_flow(ticker, data):
+    # Validasi Data Bandar
+    if not data or 'top_buyers' not in data or 'top_sellers' not in data:
         return None
 
-    # 3. Process Bandarmology (Jika Ada)
-    net_money = 0
-    top_buy = "-"
-    top_sell = "-"
-    avg_bandar = tech['vwap'] # Default fallback ke VWAP Technical
+    buyers = data['top_buyers']
+    sellers = data['top_sellers']
     
-    has_bandar_data = False
+    if not buyers or not sellers: return None
+
+    # --- 1. Analisa Bandarmology ---
+    buy_val = sum([float(x['value']) for x in buyers[:3]])
+    sell_val = sum([float(x['value']) for x in sellers[:3]])
+    net_money = buy_val - sell_val
     
-    if buyers and sellers:
-        has_bandar_data = True
-        buy_val = sum([float(x['value']) for x in buyers[:3]])
-        sell_val = sum([float(x['value']) for x in sellers[:3]])
-        net_money = buy_val - sell_val
-        top_buy = buyers[0]['code']
-        top_sell = sellers[0]['code']
-        avg_bandar = int(float(buyers[0]['avg_price']))
+    top_buyer = buyers[0]['code']
+    top_seller = sellers[0]['code']
+    avg_price = int(float(buyers[0]['avg_price']))
     
-    # 4. SCORING & REASONING
-    reasoning = []
     score = 0
+    tags = []
     
-    # Logic: Score naik jika Akumulasi, Score turun jika Distribusi
-    if has_bandar_data:
-        if net_money > 1_000_000_000:
-            score += 3
-            if top_buy not in RETAIL_CODES:
-                reasoning.append(f"🐳 **PAUS MASUK:** Institusi ({top_buy}) Akumulasi.")
-                score += 1
-            else:
-                reasoning.append("✅ **AKUMULASI:** Net Buy Positif.")
-        elif net_money < -1_000_000_000:
-            score -= 3
-            reasoning.append("⚠️ **DISTRIBUSI:** Tekanan Jual Tinggi.")
-    else:
-        reasoning.append("ℹ️ Data Bandar N/A (Analisa Teknikal Saja)")
-
-    # Logic: Harga vs Support (Avg Bandar/VWAP)
-    # Jika harga dekat Avg Bandar/VWAP (range +/- 2%), itu support kuat
-    diff = ((tech['close'] - avg_bandar) / avg_bandar) * 100
-    
-    if -2 <= diff <= 2:
-        score += 2
-        reasoning.append(f"💎 **BEST ENTRY:** Harga di area Avg Modal ({avg_bandar}).")
-    elif diff < -2:
+    # Logic Scoring Agresif
+    if net_money > 1_000_000_000: # Akumulasi > 1 Milyar
+        score += 3
+        tags.append("BIG_FLOW")
+    elif net_money > 200_000_000: # Akumulasi Kecil
         score += 1
-        reasoning.append("📉 **DISKON:** Di bawah harga wajar.")
-    elif diff > 5:
-        score -= 1
-        reasoning.append("🚀 **PREMIUM:** Harga sudah lari.")
+    elif net_money < -500_000_000: # Distribusi
+        score -= 5 
+        tags.append("DISTRIBUSI")
 
-    # Jika score 0, beri sedikit nilai berdasarkan Trend Harga
-    if score == 0 and tech['change'] > 0: score = 1
+    # Kualitas Broker
+    if top_buyer in RETAIL_CODES:
+        score -= 2 
+        tags.append("RETAIL_BUY")
+    elif top_buyer in ['BK', 'AK', 'ZP', 'MG', 'BB', 'KZ', 'RX']:
+        score += 2 
+        tags.append("WHALE_BUY")
         
-    buyer_name = BROKER_MAP.get(top_buy, top_buy)
-    
+    # Skenario Makan Ritel (Sangat Bagus)
+    if top_seller in RETAIL_CODES and "WHALE_BUY" in tags:
+        score += 2
+        tags.append("EATING_RETAIL")
+
+    # --- 2. Analisa Teknikal Simple (Posisi Harga) ---
+    curr_price = avg_price
+    change = 0
+    try:
+        # Download data singkat YFinance
+        df = yf.download(f"{ticker}.JK", period="2d", progress=False)
+        if not df.empty:
+            curr_price = int(df['Close'].iloc[-1])
+            prev = df['Close'].iloc[-2]
+            change = ((curr_price - prev) / prev) * 100
+    except:
+        pass # Fallback ke harga avg bandar kalau YF gagal
+
     return {
         "code": ticker,
         "score": score,
         "net_money": net_money,
-        "close": tech['close'],
-        "change": tech['change'],
-        "avg_ref": avg_bandar, # Bisa Avg Bandar atau VWAP
-        "buyer": f"{top_buy}-{buyer_name}",
-        "reasoning": reasoning
+        "avg_price": avg_price,
+        "curr_price": curr_price,
+        "change": change,
+        "top_buyer": top_buyer,
+        "top_seller": top_seller,
+        "tags": tags
     }
 
 def format_money(val):
-    if val == 0: return "N/A"
-    v = abs(val)
-    if v >= 1_000_000_000: return f"{val/1_000_000_000:.1f}M"
-    return f"{val/1_000_000:.0f}jt"
+    if abs(val) >= 1_000_000_000: return f"{val/1_000_000_000:.1f} M"
+    if abs(val) >= 1_000_000: return f"{val/1_000_000:.0f} jt"
+    return str(int(val))
 
 def send_telegram(message):
-    if not TELEGRAM_TOKEN or not CHAT_ID: 
-        print("❌ Telegram Token Missing")
-        return
+    if not TELEGRAM_TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    # Chunking message if too long
     for i in range(0, len(message), 4000):
         requests.post(url, json={"chat_id": CHAT_ID, "text": message[i:i+4000], "parse_mode": "Markdown"})
 
 def main():
-    mode, date_str = get_time_mode()
-    print(f"🚀 RUNNING: {mode} | Target Data: {date_str}")
-    
-    results = []
-    for i, t in enumerate(STOCKS):
-        if i % 5 == 0: print(f"Processing {t}...")
-        res = analyze_stock(t, date_str)
-        if res: results.append(res)
-        
-    # Urutkan dari Score Tertinggi
-    results.sort(key=lambda x: x['score'], reverse=True)
-    
-    # SAFETY NET: Jika hasil kosong, jangan bilang libur.
-    if not results:
-        print("❌ CRITICAL: No results generated. Check API/Connection.")
+    if not GOAPI_KEY: 
+        print("❌ API Key Missing")
         return
 
-    # REPORTING
-    if mode == "MORNING":
-        msg = f"☕ *MORNING BRIEFING: {date_str}*\n"
-        msg += f"_Top Picks untuk Trading Hari Ini_\n\n"
+    # 1. Setup
+    my_stocks = get_my_watchlist()
+    date_str, mode_name = get_target_date()
+    
+    print(f"💀 BANDAR WATCHLIST RUNNING... Target: {date_str} ({mode_name})")
+    
+    results = []
+    
+    # 2. Scanning
+    for i, ticker in enumerate(my_stocks):
+        if i % 5 == 0: print(f"Scanning {ticker}...")
+        res = analyze_flow(ticker, get_broker_summary(ticker, date_str))
+        if res: results.append(res)
         
-        # Ambil Top 7
-        for s in results[:7]:
-            icon = "🔥" if s['score'] >= 4 else "✅"
-            reasons = "\n".join([f"  • {r}" for r in s['reasoning']])
-            
-            msg += f"*{s['code']}* ({s['change']:+.1f}%) {icon}\n"
-            msg += f"💰 Net: `{format_money(s['net_money'])}`\n"
-            msg += f"🎯 Support: *{s['avg_ref']}*\n"
-            msg += f"{reasons}\n"
-            msg += "----------------------------\n"
-    else:
-        msg = f"🌇 *MARKET WRAP: {date_str}*\n"
-        # ... logic sore (sama seperti sebelumnya) ...
-        for s in results[:5]:
-            msg += f"*{s['code']}*: Score {s['score']} | Net {format_money(s['net_money'])}\n"
+    # 3. Filtering & Sorting
+    # Urutkan berdasarkan Score tertinggi (Akumulasi Bandar)
+    winners = sorted(results, key=lambda x: x['score'], reverse=True)
+    
+    if not winners:
+        send_telegram(f"⚠️ *Laporan {date_str}:* Data Kosong / Libur.")
+        return
 
+    # 4. Reporting
+    msg = f"💀 *MY WATCHLIST INSIGHT*\n"
+    msg += f"📅 Data: {date_str} | {mode_name}\n"
+    msg += f"_Analisa Pergerakan Bandar Saham Anda_\n\n"
+    
+    for s in winners:
+        # Icon Logic
+        icon = "⚪" # Netral
+        if s['score'] >= 3: icon = "🟢"
+        if "EATING_RETAIL" in s['tags']: icon = "🐳🔥" # Sinyal Kuat
+        if s['score'] < 0: icon = "🔴" # Distribusi/Jelek
+        
+        # Nama Broker
+        b_name = BROKER_MAP.get(s['top_buyer'], s['top_buyer'])
+        s_name = BROKER_MAP.get(s['top_seller'], s['top_seller'])
+        
+        # Posisi Harga
+        posisi = "Wajar"
+        if s['curr_price'] < s['avg_price']: posisi = "💎 Diskon"
+        elif s['curr_price'] > s['avg_price'] * 1.05: posisi = "⚠️ Premium"
+        
+        msg += f"*{s['code']}* ({s['change']:+.1f}%) {icon}\n"
+        msg += f"💰 Net: `{format_money(s['net_money'])}`\n"
+        msg += f"🛒 Buy: *{b_name}* (Avg {s['avg_price']})\n"
+        msg += f"📦 Sell: {s_name}\n"
+        msg += f"📊 Posisi: {posisi}\n"
+        msg += "----------------------------\n"
+        
     send_telegram(msg)
-    print("✅ Telegram Sent!")
+    print("✅ Report Sent!")
 
 if __name__ == "__main__":
     main()
