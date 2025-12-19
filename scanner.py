@@ -44,11 +44,13 @@ def get_time_window():
     utc_now = datetime.datetime.utcnow()
     local_now = utc_now + datetime.timedelta(hours=7)
     
+    # Logic: Jika pagi (sebelum jam 10), ambil data KEMARIN
     if local_now.hour < 10: 
         ref_date = local_now - datetime.timedelta(days=1)
     else: 
         ref_date = local_now
 
+    # Mundur jika weekend
     while ref_date.weekday() > 4: 
         ref_date -= datetime.timedelta(days=1)
     
@@ -69,22 +71,16 @@ def push_notification(msg):
 def trigger_auth_alert():
     global AUTH_ALERT_SENT
     if AUTH_ALERT_SENT: return
-    
-    msg = "⚠️ *SYSTEM ALERT: SYNC FAILURE* ⚠️\n"
-    msg += "Gateway returned: `401 Unauthorized`.\n"
-    msg += "Session invalidated. Please rotate the `CORE_API_KEY`."
-    
+    msg = "⚠️ *SYSTEM ALERT: SYNC FAILURE* ⚠️\nGateway returned: `401 Unauthorized`.\nPlease rotate the `CORE_API_KEY`."
     push_notification(msg)
     AUTH_ALERT_SENT = True
 
 def query_external_source(target_id, start_dt, end_dt):
     if not API_URL or not API_KEY: return None
-    
     global AUTH_ALERT_SENT
     if AUTH_ALERT_SENT: return None
 
     endpoint = f"{API_URL}/{target_id}"
-    
     params = {
         "from": start_dt, "to": end_dt,
         "transaction_type": "TRANSACTION_TYPE_NET",
@@ -92,7 +88,6 @@ def query_external_source(target_id, start_dt, end_dt):
         "investor_type": "INVESTOR_TYPE_ALL",
         "limit": 20
     }
-    
     headers = {
         'accept': 'application/json',
         'authorization': f'Bearer {API_KEY}',
@@ -102,7 +97,7 @@ def query_external_source(target_id, start_dt, end_dt):
     }
 
     try:
-        time.sleep(0.6) 
+        time.sleep(0.5) 
         res = requests.get(endpoint, headers=headers, params=params, timeout=10)
         
         if res.status_code == 401:
@@ -111,46 +106,57 @@ def query_external_source(target_id, start_dt, end_dt):
 
         if res.status_code == 200:
             payload = res.json()
-            # Return payload langsung agar bisa diparsing di process_smart_money
-            if 'data' in payload: 
-                return payload['data']
-            
+            if 'data' in payload: return payload['data']
     except: pass
     return None
 
-def process_smart_money(raw_data):
-    if not raw_data: return None
+def normalize_data(raw_data):
+    """
+    Fungsi Helper: Membersihkan format data dari API agar siap dihitung.
+    Menangani format Dictionary (Stockbit) maupun List.
+    """
+    # 1. Jika data kosong
+    if not raw_data: 
+        return []
 
-    # --- [FIX] PARSING LOGIC START ---
-    # Jika data berbentuk Dictionary (format baru Stockbit), kita ekstrak isinya
-    processed_list = []
-    
+    # 2. Jika data sudah berupa List (Format lama/bersih)
+    if isinstance(raw_data, list):
+        return raw_data
+
+    # 3. Jika data berupa Dictionary (Format Stockbit API)
     if isinstance(raw_data, dict):
+        clean_list = []
+        # Ambil dari key 'broker_summary' -> 'brokers_buy' / 'brokers_sell'
         summary = raw_data.get('broker_summary', {})
         
-        # 1. Ambil Buyers
+        if not summary: return []
+
+        # Proses BUYERS
         for b in summary.get('brokers_buy', []):
-            processed_list.append({
+            clean_list.append({
                 'broker_code': b.get('netbs_broker_code'),
-                'value': float(b.get('bval', 0)), # 'bval' = Buy Value
+                'value': float(b.get('bval', 0)),
                 'average_price': float(b.get('netbs_buy_avg_price', 0))
             })
             
-        # 2. Ambil Sellers (Dan ubah value jadi negatif)
+        # Proses SELLERS (Value dijadikan negatif)
         for s in summary.get('brokers_sell', []):
-            val = float(s.get('sval', 0)) # 'sval' = Sell Value
-            processed_list.append({
+            val = float(s.get('sval', 0))
+            clean_list.append({
                 'broker_code': s.get('netbs_broker_code'),
-                'value': -val, # PENTING: Negatifkan nilai jual
+                'value': -abs(val), # Pastikan negatif
                 'average_price': float(s.get('netbs_sell_avg_price', 0))
             })
             
-        raw_data = processed_list
-    # --- [FIX] PARSING LOGIC END ---
+        return clean_list
 
-    # Jika setelah diparsing masih kosong atau format salah
-    if not isinstance(raw_data, list):
-        return None
+    return []
+
+def process_smart_money(raw_data):
+    # Panggil fungsi normalisasi dulu biar aman
+    transactions = normalize_data(raw_data)
+    
+    if not transactions: return None
 
     alpha_net = 0 
     beta_net = 0  
@@ -158,28 +164,29 @@ def process_smart_money(raw_data):
     top_buyer = {'id': '-', 'val': 0, 'avg': 0}
     top_seller = {'id': '-', 'val': 0}
 
+    # Sorting
     try:
-        sorted_by_val = sorted(raw_data, key=lambda x: abs(float(x.get('value', 0))), reverse=True)
+        sorted_by_val = sorted(transactions, key=lambda x: abs(x['value']), reverse=True)
     except: return None
     
     if sorted_by_val:
-        b_node = [x for x in sorted_by_val if float(x['value']) > 0]
+        b_node = [x for x in sorted_by_val if x['value'] > 0]
         if b_node:
             top_buyer = {
                 'id': b_node[0]['broker_code'],
-                'val': float(b_node[0]['value']),
-                'avg': float(b_node[0]['average_price'])
+                'val': b_node[0]['value'],
+                'avg': b_node[0]['average_price']
             }
-        s_node = [x for x in sorted_by_val if float(x['value']) < 0]
+        s_node = [x for x in sorted_by_val if x['value'] < 0]
         if s_node:
             top_seller = {
                 'id': s_node[0]['broker_code'],
-                'val': abs(float(s_node[0]['value']))
+                'val': abs(s_node[0]['value'])
             }
 
-    for row in raw_data:
+    for row in transactions:
         code = row.get('broker_code')
-        val = float(row.get('value', 0))
+        val = row.get('value', 0)
         
         if code in AGENT_ALPHA:
             alpha_net += val
@@ -189,7 +196,7 @@ def process_smart_money(raw_data):
     score = 0
     tags = []
     
-    # Logic Scoring
+    # Scoring Logic
     if alpha_net > 1_000_000_000:
         score += 3
         tags.append("ALPHA_IN")
@@ -229,9 +236,7 @@ def resolve_name(code):
     return f"{code}-{ENTITY_MAP.get(code, '')}"
 
 def main():
-    if not API_KEY: 
-        print("❌ Core API Key missing")
-        return
+    if not API_KEY: return
 
     curr_dt, long_dt = get_time_window()
     targets = load_targets()
@@ -244,13 +249,18 @@ def main():
         if AUTH_ALERT_SENT: break 
         
         print(f"Scanning {item}...")
-        d_res = process_smart_money(query_external_source(item, curr_dt, curr_dt))
         
-        if AUTH_ALERT_SENT: break 
+        # Query Data
+        raw_d = query_external_source(item, curr_dt, curr_dt)
+        raw_t = query_external_source(item, long_dt, curr_dt)
         
-        t_res = process_smart_money(query_external_source(item, long_dt, curr_dt))
+        # Process Data
+        d_res = process_smart_money(raw_d)
+        t_res = process_smart_money(raw_t)
         
-        if d_res:
+        # Hanya masukkan ke report jika ada aktivitas (Net Alpha != 0 atau Score != 0)
+        # Ini untuk menghindari output 0 semua di Telegram
+        if d_res and (d_res['alpha_net'] != 0 or d_res['beta_net'] != 0):
             final_score = d_res['score']
             if t_res and t_res['direction'] == 'ACCUMULATION':
                 final_score += 1
@@ -261,12 +271,15 @@ def main():
                 "d": d_res,
                 "t": t_res
             })
+        else:
+            print(f"   -> Skipped {item} (No significant flow/Zero data)")
 
     if AUTH_ALERT_SENT: 
         print("⛔ Auth failed. Notification sent.")
         return
 
     output_buffer.sort(key=lambda x: x['rank'], reverse=True)
+    
     if not output_buffer: 
         print("⚠️ No valid data found for report.")
         return
