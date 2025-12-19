@@ -111,7 +111,7 @@ def query_external_source(target_id, start_dt, end_dt):
 
         if res.status_code == 200:
             payload = res.json()
-            # Validasi awal: Pastikan 'data' ada
+            # Return payload langsung agar bisa diparsing di process_smart_money
             if 'data' in payload: 
                 return payload['data']
             
@@ -119,14 +119,37 @@ def query_external_source(target_id, start_dt, end_dt):
     return None
 
 def process_smart_money(raw_data):
-    # 1. Cek Apakah Data Ada
     if not raw_data: return None
 
-    # 2. [FIX] Cek Apakah Tipe Data Benar (LIST)
-    # Error terjadi karena raw_data berupa String, bukan List
+    # --- [FIX] PARSING LOGIC START ---
+    # Jika data berbentuk Dictionary (format baru Stockbit), kita ekstrak isinya
+    processed_list = []
+    
+    if isinstance(raw_data, dict):
+        summary = raw_data.get('broker_summary', {})
+        
+        # 1. Ambil Buyers
+        for b in summary.get('brokers_buy', []):
+            processed_list.append({
+                'broker_code': b.get('netbs_broker_code'),
+                'value': float(b.get('bval', 0)), # 'bval' = Buy Value
+                'average_price': float(b.get('netbs_buy_avg_price', 0))
+            })
+            
+        # 2. Ambil Sellers (Dan ubah value jadi negatif)
+        for s in summary.get('brokers_sell', []):
+            val = float(s.get('sval', 0)) # 'sval' = Sell Value
+            processed_list.append({
+                'broker_code': s.get('netbs_broker_code'),
+                'value': -val, # PENTING: Negatifkan nilai jual
+                'average_price': float(s.get('netbs_sell_avg_price', 0))
+            })
+            
+        raw_data = processed_list
+    # --- [FIX] PARSING LOGIC END ---
+
+    # Jika setelah diparsing masih kosong atau format salah
     if not isinstance(raw_data, list):
-        # Print error ke Log GitHub Actions supaya kita tau isinya apa
-        print(f"⚠️ Invalid Data Format (Expecting List, got {type(raw_data)}): {raw_data}")
         return None
 
     alpha_net = 0 
@@ -135,12 +158,9 @@ def process_smart_money(raw_data):
     top_buyer = {'id': '-', 'val': 0, 'avg': 0}
     top_seller = {'id': '-', 'val': 0}
 
-    # Gunakan try-except saat sorting untuk safety tambahan
     try:
         sorted_by_val = sorted(raw_data, key=lambda x: abs(float(x.get('value', 0))), reverse=True)
-    except Exception as e:
-        print(f"⚠️ Sort Error: {e}")
-        return None
+    except: return None
     
     if sorted_by_val:
         b_node = [x for x in sorted_by_val if float(x['value']) > 0]
@@ -158,9 +178,6 @@ def process_smart_money(raw_data):
             }
 
     for row in raw_data:
-        # Validasi row harus dictionary
-        if not isinstance(row, dict): continue
-        
         code = row.get('broker_code')
         val = float(row.get('value', 0))
         
@@ -172,7 +189,7 @@ def process_smart_money(raw_data):
     score = 0
     tags = []
     
-    # Scoring Logic
+    # Logic Scoring
     if alpha_net > 1_000_000_000:
         score += 3
         tags.append("ALPHA_IN")
