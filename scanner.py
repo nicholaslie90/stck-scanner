@@ -11,6 +11,19 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GOAPI_KEY = os.environ.get("GOAPI_KEY")
 
+# --- STATIC UNIVERSE (SAFEGUARD) ---
+# Daftar ini mencakup 95% likuiditas IHSG (Bluechip & Gorengan Premium)
+LIQUID_STOCKS = [
+    "BBCA", "BBRI", "BMRI", "BBNI", "BBTN", "BRIS", "ARTO", "BTPS",
+    "ADRO", "PTBA", "ITMG", "PGAS", "MEDC", "AKRA", "HRUM", "ELSA",
+    "ANTM", "INCO", "MDKA", "TINS", "NCKL", "MBMA", "AMMN", "BRMS", "PSAB",
+    "TLKM", "EXCL", "ISAT", "JSMR", "TOWR", "TBIG",
+    "ASII", "UNTR", "GOTO", "BUKA", "EMTK",
+    "BSDE", "CTRA", "SMRA", "PWON", "PANI",
+    "ICBP", "INDF", "MYOR", "UNVR", "KLBF", "CPIN", "JPFA", "ACES", "AMRT",
+    "BREN", "TPIA", "BRPT", "CUAN", "DEWA", "BUMI", "ENRG", "DAAZ"
+]
+
 # --- KAMUS BROKER ---
 BROKER_MAP = {
     'YP': 'Mirae', 'PD': 'IndoPremier', 'CC': 'Mandiri', 'NI': 'BNI', 
@@ -23,81 +36,114 @@ BROKER_MAP = {
     'RF': 'Buana', 'IF': 'Samuel', 'DH': 'Sinarmas', 'XZ': 'Trimegah(R)'
 }
 
-RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'SQ', 'KK', 'NI', 'CC', 'GR', 'DR', 'YJ']
+RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'SQ', 'KK', 'NI', 'CC', 'GR', 'DR', 'YJ', 'EP']
 
-def get_dynamic_universe():
-    print("🔄 Screening Top Volume (TradingView)...")
+def get_time_context():
+    """
+    Menentukan apakah skrip dijalankan Pagi atau Sore (WIB).
+    Return: (date_str, mode_string)
+    """
+    # GitHub Runner pakai UTC. Kita convert ke WIB (UTC+7) manual.
+    utc_now = datetime.datetime.utcnow()
+    wib_now = utc_now + datetime.timedelta(hours=7)
+    
+    current_hour = wib_now.hour
+    
+    # Batas Pagi: Sebelum jam 12:00 WIB
+    if current_hour < 12:
+        mode = "MORNING"
+        # Kalau pagi, kita mau liat data KEMARIN (Closing sebelumnya)
+        target_date = wib_now - datetime.timedelta(days=1)
+        # Handle Weekend mundur ke Jumat
+        while target_date.weekday() > 4: 
+            target_date -= datetime.timedelta(days=1)
+    else:
+        mode = "AFTERNOON"
+        # Kalau sore (setelah market tutup), kita mau liat data HARI INI
+        target_date = wib_now
+        # Handle Weekend mundur ke Jumat
+        while target_date.weekday() > 4: 
+            target_date -= datetime.timedelta(days=1)
+            
+    date_str = target_date.strftime("%Y-%m-%d")
+    print(f"🕒 Waktu Server (WIB): {wib_now.strftime('%H:%M')} | Mode: {mode}")
+    print(f"📅 Target Analisa Data: {date_str}")
+    
+    return date_str, mode
+
+def get_dynamic_universe(mode):
+    """
+    Mengambil data TradingView sesuai Mode Waktu.
+    Pagi -> Filter by Market Cap (Data Stabil).
+    Sore -> Filter by Volume (Data Trending Hari Ini).
+    """
+    print(f"🔄 Screening TradingView (Mode: {mode})...")
     try:
-        # Cari saham likuid & trending hari ini
-        qh = Query() \
-            .select('name', 'close', 'volume', 'Value.Traded') \
-            .set_markets('indonesia') \
-            .where(
-                Column('close') >= 60,
-                Column('Value.Traded') > 3000000000 # > 3 Miliar
-            ) \
-            .order_by('volume', ascending=False) \
-            .limit(15) 
+        qh = Query().select('name', 'close', 'volume', 'market_cap_basic').set_markets('indonesia')
+        
+        if mode == "MORNING":
+            # Pagi hari volume 0, jadi kita cari Big Cap / Saham Lapis 1 & 2
+            # Filter: Market Cap > 1 Triliun
+            qh = qh.where(
+                Column('close') >= 50,
+                Column('market_cap_basic') > 1000000000000 
+            ).order_by('market_cap_basic', ascending=False)
+            
+        else: # AFTERNOON
+            # Sore hari market rame, kita cari Top Volume / Trending Stocks
+            # Filter: Transaksi Aktif
+            qh = qh.where(
+                Column('close') >= 50,
+                Column('volume') > 50000 # Minimal ada volume
+            ).order_by('volume', ascending=False)
+
+        qh = qh.limit(20)
             
         raw_data = qh.get_scanner_data()
-        
         target_data = raw_data[1] if isinstance(raw_data, tuple) else raw_data
+        
         clean_tickers = []
         for row in target_data:
-            ticker_raw = row[0] if isinstance(row[0], str) else row[1] 
-            if "IDX:" in str(ticker_raw):
-                clean_tickers.append(ticker_raw.replace("IDX:", ""))
+            for item in row:
+                if isinstance(item, str) and "IDX:" in item:
+                    clean_tickers.append(item.replace("IDX:", ""))
+                    break
         
+        print(f"✅ TradingView dapat: {len(clean_tickers)} saham")
         return clean_tickers
+
     except Exception as e:
-        print(f"⚠️ TV Error: {e}")
-        return ["BBRI", "BBCA", "BMRI", "ADRO", "TLKM", "ASII", "GOTO", "ANTM", "BRMS", "BUMI", "PANI"]
+        print(f"⚠️ TradingView Skip: {e}")
+        return []
+
+def get_combined_universe(mode):
+    dynamic = get_dynamic_universe(mode)
+    # Gabung dan Unique
+    final_list = list(set(LIQUID_STOCKS + dynamic))
+    print(f"🚀 Total Universe Scan: {len(final_list)} Saham")
+    return final_list
 
 def get_3month_context(ticker):
-    """
-    Menghitung VWAP & Trend 3 Bulan terakhir menggunakan yfinance.
-    Ini adalah proxy 'Average Price' Bandar selama 1 kuartal.
-    """
     try:
-        # Ambil data 3 bulan + sedikit buffer
         df = yf.download(f"{ticker}.JK", period="3mo", progress=False)
         if df.empty: return None
 
-        # Handle MultiIndex column (yfinance baru)
         if isinstance(df.columns, pd.MultiIndex):
-            close = df['Close'][f"{ticker}.JK"]
-            volume = df['Volume'][f"{ticker}.JK"]
-            high = df['High'][f"{ticker}.JK"]
-            low = df['Low'][f"{ticker}.JK"]
-        else:
-            close = df['Close']
-            volume = df['Volume']
-            high = df['High']
-            low = df['Low']
+            df.columns = df.columns.droplevel(1)
 
-        # 1. Hitung VWAP 3 Bulan (Harga Rata-rata Tertimbang Volume)
-        # Rumus: Sum(Price * Volume) / Sum(Volume)
-        # Kita pakai (High+Low+Close)/3 sebagai Typical Price harian
-        typical_price = (high + low + close) / 3
-        vwap_3mo = (typical_price * volume).sum() / volume.sum()
+        # VWAP Calculation
+        typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+        vwap_3mo = (typical_price * df['Volume']).sum() / df['Volume'].sum()
+        curr_price = df['Close'].iloc[-1]
         
-        curr_price = close.iloc[-1]
-        
-        # 2. Status Posisi (Diskon / Premium)
         diff_pct = ((curr_price - vwap_3mo) / vwap_3mo) * 100
         
-        position_status = "WAJAR"
-        if diff_pct < -2.0: position_status = "DISKON (Undervalued)"
-        elif diff_pct > 5.0: position_status = "MAHAL (Premium)"
+        position = "WAJAR"
+        if diff_pct < -3.0: position = "DISKON"
+        elif diff_pct > 7.0: position = "PREMIUM"
         
-        return {
-            "vwap": int(vwap_3mo),
-            "curr_price": int(curr_price),
-            "diff_pct": diff_pct,
-            "position": position_status
-        }
-    except Exception as e:
-        print(f"   ⚠️ YF Context Error {ticker}: {e}")
+        return {"vwap": int(vwap_3mo), "curr_price": int(curr_price), "position": position}
+    except Exception:
         return None
 
 def get_broker_summary(ticker, date_str):
@@ -106,25 +152,27 @@ def get_broker_summary(ticker, date_str):
     params = {"date": date_str}
     
     try:
-        time.sleep(0.3) 
-        response = requests.get(url, headers=headers, params=params, timeout=10)
+        # Rate limit safety
+        time.sleep(0.15) 
+        response = requests.get(url, headers=headers, params=params, timeout=5)
         data = response.json()
         
         if data.get('status') != 'success' or not data.get('data'): return None
         summary = data['data']
-        buyers = summary.get('top_buyers', [])
-        sellers = summary.get('top_sellers', [])
         
-        if not buyers or not sellers: return None
-        return analyze_bandar(ticker, buyers, sellers)
+        if 'top_buyers' not in summary or 'top_sellers' not in summary: return None
+        return analyze_bandar(ticker, summary['top_buyers'], summary['top_sellers'])
     except Exception:
         return None
 
 def clean_broker(code):
     name = BROKER_MAP.get(code, "")
-    return f"{code}-{name}" if name else code
+    short_name = " ".join(name.split()[:2])
+    return f"{code}-{short_name}" if short_name else code
 
 def analyze_bandar(ticker, buyers, sellers):
+    if not buyers or not sellers: return None
+    
     buy_val = sum([float(x['value']) for x in buyers[:3]])
     sell_val = sum([float(x['value']) for x in sellers[:3]])
     net_money = buy_val - sell_val
@@ -164,11 +212,6 @@ def format_money(val):
     elif abs(val) >= 1_000_000: return f"{val/1_000_000:.0f} jt"
     return f"{val:.0f}"
 
-def get_last_trading_day():
-    d = datetime.date.today()
-    while d.weekday() > 4: d -= datetime.timedelta(days=1)
-    return d.strftime("%Y-%m-%d")
-
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -181,64 +224,62 @@ def main():
         print("❌ GOAPI_KEY Missing")
         return
 
-    # 1. Universe
-    tickers = get_dynamic_universe()
-    date_str = get_last_trading_day()
-    print(f"🕵️ Analyzing {len(tickers)} stocks (3-Mo Context + Daily Flow)...")
+    # 1. TENTUKAN WAKTU & MODE
+    date_str, mode = get_time_context()
+    
+    # 2. GENERATE UNIVERSE BERDASARKAN MODE
+    tickers = get_combined_universe(mode)
     
     results = []
+    print(f"🕵️ Scanning Bandarmology...")
     
-    for t in tickers:
-        # A. Get Technical Context (3 Bulan)
-        ctx = get_3month_context(t)
+    # 3. SCANNING LOOP
+    for i, t in enumerate(tickers):
+        if i % 10 == 0: print(f"Processing {i+1}/{len(tickers)}...") 
         
-        # B. Get Broker Flow (Hari Ini)
         flow = get_broker_summary(t, date_str)
+        if not flow: continue 
         
-        if ctx and flow:
-            # Gabungkan Data
+        ctx = get_3month_context(t)
+        if ctx:
             combined = {**ctx, **flow, "code": t}
-            results.append(combined)
+        else:
+            combined = {**flow, "code": t, "vwap": 0, "curr_price": 0, "position": "N/A"}
             
-    # 2. Filtering Strategy
-    # Kita cari saham yang: Net Buy Positif DAN (Diskon ATAU Baru Breakout Wajar)
+        results.append(combined)
+            
+    # 4. FILTERING (Hanya tampilkan Akumulasi)
     winners = sorted([x for x in results if x['net_money'] > 0], key=lambda x: x['net_money'], reverse=True)
     
     if not winners:
-        send_telegram("⚠️ Market Sepi. Tidak ada sinyal kuat.")
+        send_telegram(f"⚠️ Report {date_str} ({mode}): Tidak ada akumulasi signifikan.")
         return
 
-    # 3. Reporting
-    msg = f"🦅 <b>SWING TRADER INSIGHT (3-Mo View)</b>\n"
+    # 5. REPORTING
+    title = "🌅 MORNING BRIEFING" if mode == "MORNING" else "🌇 CLOSING BELL REPORT"
+    
+    msg = f"🦅 <b>{title}</b>\n"
     msg += f"📅 Data: {date_str}\n"
-    msg += f"<i>VWAP 3 Bulan vs Arus Bandar Hari Ini</i>\n"
+    msg += f"🔍 Mode: {mode} (Top {'MarketCap' if mode=='MORNING' else 'Volume'})\n"
     msg += "="*25 + "\n\n"
     
     for s in winners[:10]:
         icon = "🟢"
         if s['score'] >= 3: icon = "🐳🔥"
         
-        # Analisa Posisi
         pos_note = ""
-        if "DISKON" in s['position']: 
-            pos_note = "💎 <b>BEST BUY</b> (Undervalued)"
-        elif "MAHAL" in s['position']:
-            pos_note = "⚠️ <b>RAWAN</b> (Sudah Tinggi)"
-        else:
-            pos_note = "✅ <b>ON TRACK</b>"
+        if s['position'] == "DISKON": pos_note = "💎 DISKON"
+        elif s['position'] == "PREMIUM": pos_note = "⚠️ PREMIUM"
+        else: pos_note = "✅ WAJAR"
 
         msg += f"<b>{s['code']}</b> {icon}\n"
         msg += f"💰 Net: <b>+{format_money(s['net_money'])}</b>\n"
-        msg += f"📊 Posisi 3-Bulan: {s['position']}\n"
-        msg += f"   • Harga Skrg: {s['curr_price']}\n"
-        msg += f"   • Rata2 Pemain (3Mo): {s['vwap']}\n"
-        msg += f"🛒 Aksi Hari Ini:\n"
-        msg += f"   • {s['buyer']} akumulasi di avg {s['avg_daily']}\n"
-        msg += f"   • {pos_note}\n"
+        msg += f"📊 Posisi: {pos_note}\n"
+        msg += f"🛒 Buy: {s['buyer']} @ {s['avg_daily']}\n"
         msg += "-"*20 + "\n"
         
     send_telegram(msg)
-    print("Report Sent!")
+    print(f"✅ Report ({mode}) Sent!")
 
 if __name__ == "__main__":
     main()
