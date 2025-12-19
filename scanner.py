@@ -9,42 +9,27 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GOAPI_KEY = os.environ.get("GOAPI_KEY")
 
-# Daftar Broker Ritel (Untuk deteksi distribusi/buangan)
-# Meskipun nama broker dinamis, kita tetap butuh list kode ritel untuk logic 'Paus vs Ritel'
-RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'SQ', 'KK', 'NI', 'CC', 'GR', 'DR']
-
-# Global Variable untuk menyimpan Kamus Broker
-BROKER_MAP = {}
-
-def get_all_brokers():
-    """
-    Mengambil seluruh daftar kode & nama broker dari GoAPI.
-    Endpoint: /stock/idx/brokers
-    """
-    print("📚 Mengunduh daftar nama broker terbaru...")
-    url = "https://api.goapi.io/stock/idx/brokers"
-    headers = {
-        "X-API-KEY": GOAPI_KEY, 
-        "Accept": "application/json"
-    }
+# --- KAMUS BROKER MANUAL (UPDATED) ---
+# Daftar ini sudah dilengkapi (HP, YJ, CP, dll)
+BROKER_MAP = {
+    # RITEL / UMUM
+    'YP': 'Mirae Asset', 'PD': 'Indo Premier', 'CC': 'Mandiri Sek', 
+    'NI': 'BNI Sek', 'XC': 'Ajaib', 'KK': 'Phillip', 
+    'SQ': 'BCA Sekuritas', 'XL': 'Stockbit', 'GR': 'Panin',
+    'OD': 'BRI Danareksa', 'AZ': 'Sucor', 'EP': 'MNC Sek', 'DR': 'RHB',
+    'YJ': 'Lautandhana', 'CP': 'Valbury', 'HP': 'Henan Putihrai', # <--- HP Added
     
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        
-        if data.get('status') == 'success':
-            results = data.get('data', [])
-            # Format return GoAPI biasanya list of dict: [{'id': 'YP', 'name': 'MIRAE ASSET SEKURITAS INDONESIA'}, ...]
-            # Kita ubah jadi Dictionary biar pencarian cepat: {'YP': 'MIRAE ASSET...', ...}
-            broker_dict = {item['id']: item['name'] for item in results}
-            print(f"✅ Berhasil memuat {len(broker_dict)} nama broker.")
-            return broker_dict
-        else:
-            print("⚠️ Gagal memuat daftar broker (API Error). Menggunakan kode saja.")
-            return {}
-    except Exception as e:
-        print(f"⚠️ Exception fetching brokers: {e}")
-        return {}
+    # INSTITUSI / ASING / BANDAR
+    'BK': 'JP Morgan', 'ZP': 'Maybank', 'AK': 'UBS', 
+    'RX': 'Macquarie', 'KZ': 'CLSA', 'CS': 'Credit Suisse',
+    'DX': 'Bahana', 'BB': 'Verdhana', 'YU': 'CGS CIMB',
+    'LG': 'Trimegah', 'AI': 'UOB Kay Hian', 'MG': 'Semesta Indovest',
+    'CD': 'Mega Capital', 'RF': 'Buana Capital', 'IF': 'Samuel',
+    'DH': 'Sinarmas', 'XZ': 'Trimegah (Retail)', 'BK': 'JP Morgan'
+}
+
+# Broker Ritel (Indikasi Distribusi jika mereka beli)
+RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'SQ', 'KK', 'NI', 'CC', 'GR', 'DR', 'YJ']
 
 def get_dynamic_universe():
     """TradingView Screener: Cari saham teramai hari ini"""
@@ -55,19 +40,38 @@ def get_dynamic_universe():
             .select('name', 'close', 'volume', 'Value.Traded') \
             .set_markets('indonesia') \
             .where(
-                Column('close') >= 60,              # Harga diatas 60 perak
-                Column('Value.Traded') > 3000000000 # Transaksi > 3 Miliar
+                Column('close') >= 50,              # Harga diatas 50
+                Column('Value.Traded') > 2000000000 # Transaksi > 2 Miliar
             ) \
             .order_by('volume', ascending=False) \
-            .limit(20) # Top 20 Saham
+            .limit(15) 
             
-        tickers = qh.get_scanner_data()
-        clean_tickers = [row[1].replace("IDX:", "") for row in tickers]
+        # FIX ERROR: Handle return type (Count, List) vs List
+        raw_data = qh.get_scanner_data()
+        
+        target_data = []
+        if isinstance(raw_data, tuple):
+            # Jika formatnya (Total, [List Data]), ambil elemen ke-2
+            target_data = raw_data[1]
+        else:
+            # Jika formatnya langsung List
+            target_data = raw_data
+
+        clean_tickers = []
+        for row in target_data:
+            # Row biasanya: ['IDX:BBRI', 4500, ...]
+            # Kita ambil elemen pertama dan buang "IDX:"
+            ticker_raw = row[0] if isinstance(row[0], str) else row[1] 
+            if "IDX:" in str(ticker_raw):
+                clean_tickers.append(ticker_raw.replace("IDX:", ""))
+        
+        print(f"✅ Dapat {len(clean_tickers)} saham: {clean_tickers}")
         return clean_tickers
 
     except Exception as e:
         print(f"⚠️ TradingView Error: {e}")
-        return ["BBRI", "BBCA", "BMRI", "ADRO", "TLKM", "ASII", "GOTO", "ANTM", "BRMS", "BUMI"]
+        # Fallback Universe jika TV error
+        return ["BBRI", "BBCA", "BMRI", "ADRO", "TLKM", "ASII", "GOTO", "ANTM", "BRMS", "BUMI", "PANI", "BREN"]
 
 def send_telegram_message(message):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -83,7 +87,7 @@ def get_broker_summary(ticker, date_str):
     params = {"date": date_str}
     
     try:
-        time.sleep(0.25) # Rate limit safety
+        time.sleep(0.3) # Rate limit safety
         response = requests.get(url, headers=headers, params=params, timeout=10)
         data = response.json()
         
@@ -100,20 +104,13 @@ def get_broker_summary(ticker, date_str):
         return None
 
 def clean_broker_name(code):
-    """
-    Ubah Kode jadi Nama Pendek yang enak dibaca.
-    Contoh: 'YP' -> 'YP - MIRAE'
-    """
-    full_name = BROKER_MAP.get(code, "")
-    
-    # Pendekkan nama yang terlalu panjang biar muat di HP
-    short_name = full_name.replace("SEKURITAS", "").replace("INDONESIA", "").replace("PT ", "").strip()
-    
-    # Ambil 1-2 kata pertama saja
-    if len(short_name) > 15:
-        short_name = " ".join(short_name.split()[:2])
-        
-    return f"{code} ({short_name})" if short_name else code
+    """Ubah Kode jadi Nama Pendek"""
+    name = BROKER_MAP.get(code, "")
+    if name:
+        # Ambil 2 kata pertama saja biar rapi dan pendek
+        short_name = " ".join(name.split()[:2])
+        return f"{code}-{short_name}"
+    return code
 
 def analyze_bandar(ticker, buyers, sellers):
     # Hitung Net Money Flow (Top 3)
@@ -163,7 +160,7 @@ def format_money(val):
 
 def get_last_trading_day():
     d = datetime.date.today()
-    # Jika run hari Sabtu/Minggu, mundur ke Jumat
+    # Jika run hari Sabtu(5)/Minggu(6), mundur ke Jumat
     while d.weekday() > 4: d -= datetime.timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 
@@ -171,12 +168,8 @@ def main():
     if not GOAPI_KEY:
         print("❌ GOAPI_KEY Belum diset!")
         return
-
-    # 1. FETCH DATA BROKER (Isi kamus dulu)
-    global BROKER_MAP
-    BROKER_MAP = get_all_brokers()
     
-    # 2. GENERATE WATCHLIST DINAMIS
+    # 1. GENERATE WATCHLIST DINAMIS
     tickers = get_dynamic_universe()
     
     date_str = get_last_trading_day()
@@ -187,16 +180,16 @@ def main():
         data = get_broker_summary(t, date_str)
         if data: results.append(data)
         
-    # 3. FILTERING (Hanya tampilkan yang Net Buy Positif / Akumulasi)
+    # 2. FILTERING (Hanya tampilkan yang Net Buy Positif / Akumulasi)
     winners = sorted([x for x in results if x['net_money'] > 0], key=lambda x: x['net_money'], reverse=True)
     
     if not winners:
         send_telegram_message("⚠️ Tidak ada akumulasi signifikan di Top Volume hari ini.")
         return
 
-    # 4. REPORTING
+    # 3. REPORTING
     msg = f"📡 <b>SMART BANDAR DETECTOR</b>\n"
-    msg += f"📅 {date_str} | Generated by GitHub Actions\n"
+    msg += f"📅 {date_str} | Market Leader\n"
     msg += "="*25 + "\n\n"
     
     # Tampilkan Top 10
@@ -205,10 +198,10 @@ def main():
         if s['score'] >= 3: icon = "🐳🔥"
         
         msg += f"<b>{s['code']}</b> {icon}\n"
-        msg += f"💰 Net Money: <b>+{format_money(s['net_money'])}</b>\n"
-        msg += f"🛒 Buyer: <b>{s['top_buyer_display']}</b>\n"
+        msg += f"💰 Net: <b>+{format_money(s['net_money'])}</b>\n"
+        msg += f"🛒 Buy: <b>{s['top_buyer_display']}</b>\n"
         msg += f"   Avg: {s['avg_price']}\n"
-        msg += f"📦 Seller: {s['top_seller_display']}\n"
+        msg += f"📦 Sell: {s['top_seller_display']}\n"
         msg += f"📊 {s['status']}\n"
         msg += "-"*20 + "\n"
         
