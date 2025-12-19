@@ -22,7 +22,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install yfinance requests pandas tradingview-scanner
+          pip install yfinance requests pandas tradingview-screener
 
       # - name: Debug Connection
       #   env:
