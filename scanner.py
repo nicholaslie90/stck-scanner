@@ -3,7 +3,8 @@ import os
 import datetime
 import time
 import json
-import yfinance as yf # Wajib ada untuk data harga real-time
+import yfinance as yf
+import math
 
 # --- CONFIGURATION (OBFUSCATED) ---
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -42,15 +43,14 @@ def push_notification(msg):
 
 def get_scalper_candidates(tickers):
     """
-    Fungsi Utama Scalper:
-    Mengambil data Real-Time (High, Low, Current, Volume) via YFinance.
-    Mengembalikan list saham yang diurutkan berdasarkan VOLATILITAS (Swing).
+    LOGIC BARU: ACTION ZONE
+    Hanya ambil saham yang volatilitas tinggi DAN posisinya tidak 'tidur' di tengah.
     """
-    print(f"⚡ Screening {len(tickers)} stocks for Volatility & Volume...")
+    print(f"⚡ Turbo Screening {len(tickers)} stocks...")
     
     yf_tickers = [f"{t}.JK" for t in tickers]
     try:
-        # Download data hari ini (Intraday)
+        # Download data hari ini
         df = yf.download(yf_tickers, period="1d", group_by='ticker', progress=False)
     except Exception as e:
         print(f"⚠️ YF Error: {e}")
@@ -63,23 +63,43 @@ def get_scalper_candidates(tickers):
             data = df[f"{t}.JK"]
             if data.empty: continue
             
-            # Ambil candle terakhir (Realtime/Closing terakhir)
+            # Data Realtime/Closing Terakhir
             high = float(data['High'].iloc[-1])
             low = float(data['Low'].iloc[-1])
             close = float(data['Close'].iloc[-1])
             open_price = float(data['Open'].iloc[-1])
             vol = float(data['Volume'].iloc[-1])
             
-            # 1. Hitung Volatilitas (Swing Range dalam %)
-            # Rumus: (High - Low) / Open
-            if open_price == 0: continue
-            swing_pct = ((high - low) / open_price) * 100
+            if open_price == 0 or vol == 0: continue
             
-            # 2. Hitung Value Transaksi (Estimasi Kasar)
+            # 1. Swing Calculation
+            swing_pct = ((high - low) / low) * 100
+            
+            # 2. Value Transaction (Likuiditas)
             value_tx = close * vol
             
-            # Filter Awal: Hanya ambil yang swing > 1.5% dan Value > 1 Miliar (Biar liquid)
-            if swing_pct > 1.5 and value_tx > 1_000_000_000:
+            # 3. POSITION LOGIC (PENTING!)
+            # 0.0 = Harga di Low (Jelek/Panic)
+            # 0.5 = Harga di Tengah (Bosan/Sideways) -> CONTOH BBRM
+            # 1.0 = Harga di High (Strong Breakout)
+            range_price = high - low
+            if range_price == 0: continue
+            
+            position_score = (close - low) / range_price
+            
+            # LOGIC FILTER:
+            # - Swing minimal 2% (Biar ada daging)
+            # - Value minimal 2 Miliar (Biar bisa keluar masuk)
+            # - Posisi Harga: Hapus yang di tengah (0.3 s/d 0.7) KECUALI swingnya gila (>5%)
+            
+            is_boring_middle = 0.35 < position_score < 0.65
+            
+            if swing_pct > 2.0 and value_tx > 2_000_000_000:
+                
+                # Penalty buat saham yang diam di tengah (kayak BBRM siang hari)
+                if is_boring_middle and swing_pct < 6.0:
+                    continue # Skip saham nanggung
+                
                 candidates.append({
                     'id': t,
                     'swing': swing_pct,
@@ -88,32 +108,31 @@ def get_scalper_candidates(tickers):
                     'low': low,
                     'volume': vol,
                     'value_tx': value_tx,
-                    'change': ((close - open_price) / open_price) * 100
+                    'change': ((close - open_price) / open_price) * 100,
+                    'pos_score': position_score # 1.0 means at High
                 })
         except: continue
         
-    # URUTKAN BERDASARKAN SWING TERTINGGI (Most Volatile First)
-    candidates.sort(key=lambda x: x['swing'], reverse=True)
+    # URUTKAN BERDASARKAN KOMBINASI SWING & VALUE
+    # Kita cari yang Rame (Value Gede) DAN Gerak (Swing Gede)
+    # Logaritma Value biar saham bluechip ga mendominasi cuma karena value gede
+    candidates.sort(key=lambda x: (x['swing'] * math.log(x['value_tx'])), reverse=True)
     
-    # Ambil Top 15 Paling Volatile untuk dicek Bandarnya
     return candidates[:15]
 
-# --- HIDDEN API HANDLERS (Sama seperti sebelumnya) ---
+# --- HIDDEN API HANDLERS ---
 
 def trigger_auth_alert():
     global AUTH_ALERT_SENT
     if AUTH_ALERT_SENT: return
-    msg = "⚠️ *SCALPER ALERT: API GATEWAY 401* ⚠️\nPlease rotate the `CORE_API_KEY`."
+    # Pesan disamarkan jadi Error Database connection
+    msg = "⚠️ *DB_SYNC_ERROR: Connection Refused (401)* ⚠️\nCredential invalid. Please rotate `CORE_API_KEY`."
     push_notification(msg)
     AUTH_ALERT_SENT = True
 
 def query_external_source(target_id):
-    # Untuk Scalper, kita selalu minta data HARI INI (Intraday)
-    # Jika market tutup, otomatis dapat closing hari ini
     utc_now = datetime.datetime.utcnow()
     wib_now = utc_now + datetime.timedelta(hours=7)
-    
-    # Simple Date Logic: Hari ini
     date_str = wib_now.strftime("%Y-%m-%d")
     
     if not API_URL or not API_KEY: return None
@@ -122,7 +141,7 @@ def query_external_source(target_id):
 
     endpoint = f"{API_URL}/{target_id}"
     params = {
-        "from": date_str, "to": date_str, # Intraday Range
+        "from": date_str, "to": date_str,
         "transaction_type": "TRANSACTION_TYPE_NET",
         "market_board": "MARKET_BOARD_REGULER",
         "investor_type": "INVESTOR_TYPE_ALL",
@@ -134,7 +153,7 @@ def query_external_source(target_id):
     }
 
     try:
-        time.sleep(0.3) # Fast request for scalping
+        time.sleep(0.3)
         res = requests.get(endpoint, headers=headers, params=params, timeout=5)
         if res.status_code == 401:
             trigger_auth_alert()
@@ -178,22 +197,18 @@ def process_flow(raw_data):
         if c in AGENT_ALPHA: alpha_net += v
         elif c in AGENT_BETA: beta_net += v
 
-    # Scoring Scalper (Lebih agresif)
     score = 0
-    if alpha_net > 500_000_000: score += 3 # Smart Money Masuk
-    if beta_net < -200_000_000: score += 2 # Ritel Buang Barang
+    if alpha_net > 500_000_000: score += 3 
+    if beta_net < -200_000_000: score += 2 
     if top_buyer['id'] in AGENT_ALPHA: score += 2
     
     status = "NEUTRAL"
-    if score >= 3: status = "BULLISH FLOW"
-    elif score <= -2: status = "BEARISH FLOW"
+    if score >= 3: status = "ACCUMULATION"
+    elif score <= -2: status = "DISTRIBUTION"
 
     return {
-        "status": status,
-        "score": score,
-        "alpha_net": alpha_net,
-        "top_buy": top_buyer,
-        "top_sell": top_seller
+        "status": status, "score": score, "alpha_net": alpha_net,
+        "top_buy": top_buyer, "top_sell": top_seller
     }
 
 def format_val(v):
@@ -207,69 +222,63 @@ def main():
     if not API_KEY: return
     
     targets = load_targets()
-    # 1. SCAN VOLATILITY DULU (YFINANCE)
+    # 1. TURBO FILTER: Cari yang gerak AJA
     candidates = get_scalper_candidates(targets)
     
     if not candidates:
-        print("⚠️ No volatile stocks found.")
+        print("⚠️ Market Sepi / No Volatility.")
         return
 
     report_buffer = []
-    print(f"🚀 Analyzing Flows for top {len(candidates)} volatile stocks...")
+    print(f"🚀 Scanning Flow for top {len(candidates)} movers...")
 
     for stock in candidates:
         if AUTH_ALERT_SENT: break
         
-        # 2. CEK BANDAR FLOW (HIDDEN API)
-        # Kita hanya cek saham yang volatilitasnya tinggi
-        print(f"   Checking flow for {stock['id']} (Swing: {stock['swing']:.1f}%)")
         flow = process_flow(query_external_source(stock['id']))
-        
-        # Gabungkan data Price Action + Bandar Flow
         stock_data = {**stock, "flow": flow}
         report_buffer.append(stock_data)
 
     if not report_buffer: return
 
-    # Sort Final: Prioritas Bullish Flow dengan Swing Tinggi
-    # Logic: Kalau flow Bullish, taruh atas. Kalau Netral tapi Swing tinggi, taruh tengah.
-    report_buffer.sort(key=lambda x: (x['flow']['score'] if x['flow'] else -10, x['swing']), reverse=True)
+    # Sort Final: Bullish Flow + Price near High
+    report_buffer.sort(key=lambda x: (x['flow']['score'] if x['flow'] else -10, x['pos_score']), reverse=True)
 
-    # REPORT GENERATION
-    txt = f"⚡ *SCALPER VOLATILITY SCAN* ⚡\n"
-    txt += f"⏱️ Time: {datetime.datetime.now().strftime('%H:%M WIB')}\n"
-    txt += f"_Most Volatile & Liquid Today_\n\n"
+    txt = f"⚡ *SCALPER ACTION ZONE* ⚡\n"
+    txt += f"⏱️ {datetime.datetime.now().strftime('%H:%M WIB')}\n"
+    txt += f"_Filter: High Volatility & Active Price_\n\n"
     
     for s in report_buffer:
         f = s['flow']
         
-        # Icon Ticker
         icon = "⚪"
         if s['change'] > 0: icon = "🟢"
         if s['change'] < 0: icon = "🔴"
         
-        # Status Flow
+        # Indicator Posisi Harga
+        pos_bar = "Mid"
+        if s['pos_score'] > 0.8: pos_bar = "🔥 *Near High*"
+        elif s['pos_score'] < 0.2: pos_bar = "🔻 *Near Low*"
+        
         flow_stat = "❓ No Data"
         alpha_str = "0"
         buyer_str = "-"
+        
         if f:
             if f['score'] >= 3: flow_stat = "🐳 *BIG ACCUM*"
-            elif f['score'] >= 1: flow_stat = "✅ Mod. Accum"
+            elif f['score'] >= 1: flow_stat = "✅ Accum"
             elif f['score'] <= -2: flow_stat = "⚠️ DISTRIB"
             else: flow_stat = "⚖️ Neutral"
-            
             alpha_str = format_val(f['alpha_net'])
             buyer_str = f"{resolve_name(f['top_buy']['id'])} @{int(f['top_buy']['avg'])}"
 
-        # Hitung jarak harga sekarang ke High (Potensi Profit Sisa)
-        upside_left = ((s['high'] - s['price']) / s['price']) * 100
+        upside = ((s['high'] - s['price']) / s['price']) * 100
         
         txt += f"*{s['id']}* {icon} (Chg: {s['change']:+.1f}%)\n"
-        txt += f"🌊 *Swing: {s['swing']:.1f}%* (Vol: {format_val(s['value_tx'])})\n"
+        txt += f"🌊 *Swing: {s['swing']:.1f}%* | {pos_bar}\n"
         txt += f"📊 Flow: {flow_stat} (Alpha: {alpha_str})\n"
         txt += f"🛒 Lead: {buyer_str}\n"
-        txt += f"📏 Range: {int(s['low'])} - {int(s['high'])}\n"
-        txt += f"🎯 Curr: {int(s['price'])}\n"
+        txt += f"🎯 Price: {int(s['price'])} (High: {int(s['high'])})\n"
         txt += "----------------------------\n"
         
     push_notification(txt)
