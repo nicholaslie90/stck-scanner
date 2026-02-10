@@ -35,19 +35,29 @@ def format_val(v):
 def get_fundamentals(ticker):
     """
     Fetch key fundamentals (PE, PBV, ROE).
-    Only called for Value Candidates to save time.
+    Includes safety cast to float to prevent TypeErrors.
     """
     try:
         stock = yf.Ticker(f"{ticker}.JK")
         info = stock.info
+        
+        # Helper to safely convert values to float
+        def safe_get(key, default=999.0):
+            val = info.get(key)
+            try:
+                if val is None: return default
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+
         return {
-            'pe': info.get('trailingPE', 999), 
-            'pbv': info.get('priceToBook', 999),
-            'roe': info.get('returnOnEquity', 0),
-            'div_yield': info.get('dividendYield', 0)
+            'pe': safe_get('trailingPE', 999.0), 
+            'pbv': safe_get('priceToBook', 999.0),
+            'roe': safe_get('returnOnEquity', 0.0),
+            'div_yield': safe_get('dividendYield', 0.0)
         }
     except:
-        return {'pe': 999, 'pbv': 999, 'roe': 0, 'div_yield': 0}
+        return {'pe': 999.0, 'pbv': 999.0, 'roe': 0.0, 'div_yield': 0.0}
 
 def calc_trading_plan(high, low, close):
     daily_range = high - low
