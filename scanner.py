@@ -199,22 +199,22 @@ def main():
         
         # --- VALUE INVESTING SECTION ---
         if s['is_value']:
-            txt += f"💎 *VALUE ALERT (Near 3Mo Low)*\n"
-            txt += f"   • Low Distance: *{s['dist_low3mo']:.1f}%* from bottom\n"
-            
             # Valuation Check
             pe = s['pe']
             pbv = s['pbv']
-            val_status = "Neutral"
-            if pe > 0 and pe < 10 and pbv < 1.0: val_status = "✅ UNDERVALUED"
-            elif pe > 25: val_status = "⚠️ EXPENSIVE"
+            
+            # Use icons/short text to save space
+            val_status = "😐"
+            if pe > 0 and pe < 10 and pbv < 1.0: val_status = "✅ CHEAP"
+            elif pe > 25: val_status = "⚠️ EXP"
             
             # Format Fundamentals nicely
             pe_str = f"{pe:.1f}x" if pe != 999 else "-"
             pbv_str = f"{pbv:.1f}x" if pbv != 999 else "-"
             
-            txt += f"   • Fund: PE {pe_str} | PBV {pbv_str}\n"
-            txt += f"   • Status: {val_status}\n"
+            # COMPACT ONE-LINER
+            # Ex: 💎 Low+4.9% | PE 9.3x PBV 1.4x | 😐
+            txt += f"💎 Low+{s['dist_low3mo']:.0f}% | PE {pe_str} PBV {pbv_str} | {val_status}\n"
         
         # --- SCALPING SECTION ---
         # Show this if it has volume/volatility
