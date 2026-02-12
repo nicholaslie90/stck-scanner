@@ -223,7 +223,6 @@ def main():
             if s['rvol'] > 1.5: rvol_icon = "🔊"
             if s['rvol'] > 3.0: rvol_icon = "📢"
             
-            txt += f"⚔️ *Day Trade Data*\n"
             txt += f"   • Vol: {s['rvol']:.1f}x Avg {rvol_icon} | Swing: {s['swing']:.1f}%\n"
             txt += f"   • Plan: Buy {s['plan_entry']} | TP {s['plan_target']} | SL {s['plan_sl']}\n"
             
