@@ -227,7 +227,7 @@ def main():
             txt += f"   • Vol: {s['rvol']:.1f}x Avg {rvol_icon} | Swing: {s['swing']:.1f}%\n"
             txt += f"   • Plan: Buy {s['plan_entry']} | TP {s['plan_target']} | SL {s['plan_sl']}\n"
             
-        txt += "----------------------------\n"
+        txt += "\n"
         
     push_notification(txt)
     print("✅ Report Sent!")
