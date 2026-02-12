@@ -214,7 +214,7 @@ def main():
             
             # COMPACT ONE-LINER
             # Ex: 💎 Low+4.9% | PE 9.3x PBV 1.4x | 😐
-            txt += f"💎 Low+{s['dist_low3mo']:.0f}% | PE {pe_str} PBV {pbv_str} | {val_status}\n"
+            txt += f"Low+{s['dist_low3mo']:.0f}% | PE {pe_str} PBV {pbv_str} | {val_status}\n"
         
         # --- SCALPING SECTION ---
         # Show this if it has volume/volatility
