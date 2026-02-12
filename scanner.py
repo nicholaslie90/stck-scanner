@@ -205,8 +205,8 @@ def main():
             
             # Use icons/short text to save space
             val_status = "😐"
-            if pe > 0 and pe < 10 and pbv < 1.0: val_status = "✅ CHEAP"
-            elif pe > 25: val_status = "⚠️ EXP"
+            if pe > 0 and pe < 10 and pbv < 1.0: val_status = "✅"
+            elif pe > 25: val_status = "⚠️"
             
             # Format Fundamentals nicely
             pe_str = f"{pe:.1f}x" if pe != 999 else "-"
